@@ -651,7 +651,7 @@ def main():
     torch.onnx._export(model, tuple(sample_inputs), model_name + ".onnx",
                     input_names=input_names, 
                     output_names=output_names,
-                    opset_version=12,
+                    opset_version=11,
                     dynamic_axes=dynamic_axes,
                     training=True,
                     _retain_param_name=True,

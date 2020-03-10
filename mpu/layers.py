@@ -129,7 +129,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Mask the output embedding.
         output_parallel[input_mask, :] = 0.0
         # Reduce across all the model parallel GPUs.
-        output = reduce_from_model_parallel_region(output_parallel)
+        #output = reduce_from_model_parallel_region(output_parallel)
+        output = output_parallel
         return output
 
 
@@ -173,7 +174,8 @@ class ParallelEmbedding(torch.nn.Module):
             stride=1, return_master_weight=False)
 
     def forward(self, input_):
-        input_parallel = copy_to_model_parallel_region(input_)
+        #input_parallel = copy_to_model_parallel_region(input_)
+        input_parallel = input_
         output_parallel = F.embedding(input_parallel, self.weight,
                                       self.padding_idx, self.max_norm,
                                       self.norm_type, self.scale_grad_by_freq,
@@ -238,7 +240,8 @@ class ColumnParallelLinear(torch.nn.Module):
 
     def forward(self, input_):
         # Set up backprop all-reduce.
-        input_parallel = copy_to_model_parallel_region(input_)
+        #input_parallel = copy_to_model_parallel_region(input_)
+        input_parallel = input_
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight, self.bias)
         if self.gather_output:
@@ -318,7 +321,8 @@ class RowParallelLinear(torch.nn.Module):
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight)
         # All-reduce across all the partitions.
-        output_ = reduce_from_model_parallel_region(output_parallel)
+        #output_ = reduce_from_model_parallel_region(output_parallel)
+        output_ = output_parallel
         if self.bias is not None:
             output = output_ + self.bias
         else:

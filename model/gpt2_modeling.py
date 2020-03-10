@@ -123,8 +123,9 @@ class GPT2Model(torch.nn.Module):
             transformer_output, presents = transformer_output
 
         # Parallel logits.
-        transformer_output_parallel = mpu.copy_to_model_parallel_region(
-            transformer_output)
+        #transformer_output_parallel = mpu.copy_to_model_parallel_region(
+        #    transformer_output)
+        transformer_output_parallel = transformer_output
         logits_parallel = F.linear(transformer_output_parallel,
                                    self.word_embeddings.weight)
 
