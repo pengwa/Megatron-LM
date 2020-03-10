@@ -646,16 +646,26 @@ def main():
 
 
     sample_outputs=[torch.randn([1, 1, vocab_size], dtype=torch.float32, device=None)]
-    model_name = "megatron-gpt2_hidden-size-" + str(args.hidden_size) + "_num-layers-" + str(args.num_layers) + "_vocab-size-" + str(vocab_size)
-    model_name += "_num-attention-heads-" + str(args.num_attention_heads) + "_max-position-embeddings-" + str(args.max_position_embeddings)
-    torch.onnx._export(model, tuple(sample_inputs), model_name + ".onnx",
-                    input_names=input_names, 
-                    output_names=output_names,
-                    opset_version=11,
-                    dynamic_axes=dynamic_axes,
-                    training=True,
-                    _retain_param_name=True,
-                    example_outputs=tuple(sample_outputs))
+    model_folder_name = "megatron-gpt2_hidden-size-" + str(args.hidden_size) + "_num-layers-" + str(args.num_layers) + "_vocab-size-" + str(vocab_size)
+    model_folder_name += "_num-attention-heads-" + str(args.num_attention_heads) + "_max-position-embeddings-" + str(args.max_position_embeddings)
+
+    bashCommand = "rm -rf " + model_folder_name
+    import subprocess
+    process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
+    output, error = process.communicate()
+    bashCommand = "mkdir " + model_folder_name
+    process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
+    output, error = process.communicate()
+
+    torch.onnx._export(model, tuple(sample_inputs), model_folder_name + "/model.onnx",
+                       input_names=input_names, 
+                       output_names=output_names,
+                       opset_version=11,
+                       dynamic_axes=dynamic_axes,
+                       training=True,
+                       _retain_param_name=True,
+                       example_outputs=tuple(sample_outputs),
+                       use_external_data_format=True)
 
     print("==================END=======================")
     return
