@@ -21,7 +21,7 @@ import random
 import math
 import numpy as np
 import torch
-
+import io
 from arguments import get_args
 from configure_data import configure_data
 from fp16 import FP16_Module
@@ -66,25 +66,25 @@ def get_model(args):
             sum([p.nelement() for p in model.parameters()])), flush=True)
 
     # GPU allocation.
-    model.cuda(torch.cuda.current_device())
+    #model.cuda(torch.cuda.current_device())
 
     # Fp16 conversion.
     if args.fp16:
         model = FP16_Module(model)
 
     # Wrap model for distributed training.
-    if args.DDP_impl == 'torch':
-        i = torch.cuda.current_device()
-        args.DDP_type = torch.nn.parallel.distributed.DistributedDataParallel
-        model = args.DDP_type(model, device_ids=[i], output_device=i,
-                              process_group=mpu.get_data_parallel_group())
-    elif args.DDP_impl == 'local':
-        args.DDP_type = LocalDDP
-        model = args.DDP_type(model)
-    else:
-        print_rank_0('Unknown DDP implementation specified: {}. '
-                     'Exiting.'.format(args.DDP_impl))
-        exit()
+    # if args.DDP_impl == 'torch':
+    #     i = torch.cuda.current_device()
+    #     args.DDP_type = torch.nn.parallel.distributed.DistributedDataParallel
+    #     model = args.DDP_type(model, device_ids=[i], output_device=i,
+    #                           process_group=mpu.get_data_parallel_group())
+    # elif args.DDP_impl == 'local':
+    #     args.DDP_type = LocalDDP
+    #     model = args.DDP_type(model)
+    # else:
+    #     print_rank_0('Unknown DDP implementation specified: {}. '
+    #                  'Exiting.'.format(args.DDP_impl))
+    #     exit()
 
     return model
 
@@ -613,6 +613,52 @@ def main():
 
     # Random seeds for reproducability.
     set_random_seed(args.seed)
+
+    print("==================START======================")
+    model = get_model(args)
+
+    dynamic_axes={}
+    f = io.BytesIO()
+    input_names=["input_ids", "position_ids", "attention_mask"]
+    dynamic_axes["input_ids"] = { 0: "batch", 1: "seqlen"}
+    dynamic_axes["position_ids"] = {0: "batch", 1: "seqlen"}
+    dynamic_axes["attention_mask"] = {0: "att_mask_batch", 2: "seqlen", 3: "seqlen"}
+    output_names=["output"]
+    dynamic_axes["output"] = {0: "batch", 1: "seqlen"}
+
+    #sample_inputs=[torch.randn(["batch", "seqlen"], torch.float32),
+    #  torch.randn(["seqlen"], torch.float32),
+    #  torch.randn(["att_mask_batch", 1, "seqlen", "seqlen"], torch.int64),
+    #]
+    sample_inputs=[torch.randint(2000, [1, 1],  dtype=torch.int64, device=None),
+      torch.randint(20, [1, 1], dtype=torch.int64, device=None),
+      torch.randn([1, 1, 1, 1], dtype=torch.float32, device=None),
+    ]
+
+    before = args.vocab_size
+    vocab_size = before
+    multiple = args.make_vocab_size_divisible_by * 8
+    while (vocab_size % multiple) != 0:
+        vocab_size += 1
+    print('> padded vocab (size: {}) with {} dummy '
+                 'tokens (new size: {})'.format(
+                     before, vocab_size - before, vocab_size))
+
+
+    sample_outputs=[torch.randn([1, 1, vocab_size], dtype=torch.float32, device=None)]
+    model_name = "megatron-gpt2_hidden-size-" + str(args.hidden_size) + "_num-layers-" + str(args.num_layers) + "_vocab-size-" + str(vocab_size)
+    model_name += "_num-attention-heads-" + str(args.num_attention_heads) + "_max-position-embeddings-" + str(args.max_position_embeddings)
+    torch.onnx._export(model, tuple(sample_inputs), model_name + ".onnx",
+                    input_names=input_names, 
+                    output_names=output_names,
+                    opset_version=12,
+                    dynamic_axes=dynamic_axes,
+                    training=True,
+                    _retain_param_name=True,
+                    example_outputs=tuple(sample_outputs))
+
+    print("==================END=======================")
+    return
 
     # Data stuff.
     train_data, val_data, test_data, args.vocab_size, \
