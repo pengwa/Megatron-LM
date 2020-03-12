@@ -660,7 +660,7 @@ def main():
     torch.onnx._export(model, tuple(sample_inputs), model_folder_name + "/model.onnx",
                        input_names=input_names, 
                        output_names=output_names,
-                       opset_version=11,
+                       opset_version=10,
                        dynamic_axes=dynamic_axes,
                        training=True,
                        _retain_param_name=True,
