@@ -38,7 +38,10 @@ from megatron import print_rank_last
 from megatron.checkpointing import load_checkpoint
 from megatron.checkpointing import save_checkpoint
 from megatron.model import FP16Module
-from megatron.optimizer import get_megatron_optimizer
+from megatron.optimizer import get_megatron_optimizer 
+from megatron.model import GeLUFunction, FusedLayerNormAffineFunction
+from apex.normalization.fused_layer_norm import FusedLayerNormAffineFunction as ApexFusedLayerNormAffineFunction
+from megatron.mpu import _VocabParallelCrossEntropy
 
 from megatron.initialize import initialize_megatron
 from megatron.initialize import write_args_to_tensorboard
@@ -48,7 +51,23 @@ from megatron.model.realm_model import ICTBertModel
 from megatron.utils import check_adlr_autoresume_termination
 from megatron.data.data_loaders import build_pretraining_data_loader
 from megatron.utils import report_memory
+from onnxruntime.training import ORTModule
 
+
+import onnx
+import torch
+torch.manual_seed(1)
+from onnxruntime.training import ORTModule
+import onnxruntime as ort
+import os
+from torch.utils.dlpack import from_dlpack, to_dlpack
+ 
+from onnxruntime.capi.onnxruntime_inference_collection import OrtValue
+from onnxruntime.capi import _pybind_state as C
+import copy
+
+def _ortvalue_from_dlpack(dlpack_tensor):
+    return OrtValue(C.OrtValue.from_dlpack(dlpack_tensor, False))
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -129,21 +148,21 @@ def pretrain(train_valid_test_dataset_provider, model_provider,
                           train_data_iterator, valid_data_iterator)
     print_datetime('after training is done')
 
-    if args.do_valid:
-        prefix = 'the end of training for val data'
-        evaluate_and_print_results(prefix, forward_step_func,
-                                   valid_data_iterator, model,
-                                   iteration, False)
+    # if args.do_valid:
+    #     prefix = 'the end of training for val data'
+    #     evaluate_and_print_results(prefix, forward_step_func,
+    #                                valid_data_iterator, model,
+    #                                iteration, False)
 
-    if args.save and iteration != 0:
-        save_checkpoint(iteration, model, optimizer, lr_scheduler)
+    # if args.save and iteration != 0:
+    #     save_checkpoint(iteration, model, optimizer, lr_scheduler)
 
-    if args.do_test:
-        # Run on test data.
-        prefix = 'the end of training for test data'
-        evaluate_and_print_results(prefix, forward_step_func,
-                                   test_data_iterator, model,
-                                   0, True)
+    # if args.do_test:
+    #     # Run on test data.
+    #     prefix = 'the end of training for test data'
+    #     evaluate_and_print_results(prefix, forward_step_func,
+    #                                test_data_iterator, model,
+    #                                0, True)
 
 def update_train_iters(args):
 
@@ -174,6 +193,448 @@ def update_train_iters(args):
 
     print_rank_0('setting training iterations to {}'.format(args.train_iters))
 
+class ApexFusedLayerNormAffineFunctionWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(ApexFusedLayerNormAffineFunctionWrapperModule, self).__init__()
+        self.input_tensors = []
+        self.forward_outputs = []
+        self.output_tensor = None
+
+    def compute(self, x, y, z):
+        try:
+            import builtins
+            self.input_tensors = [from_dlpack(i) for i in [x, y, z]]
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            for _, t in enumerate(self.input_tensors):
+                t.requires_grad = True
+            self.input_tensors.extend([(1024,), 1e-05])
+            with torch.enable_grad():
+                print("==== Entering ApexFusedLayerNormAffineFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.output_tensor = ApexFusedLayerNormAffineFunction.apply(*self.input_tensors)
+                print(self.output_tensor)
+                print("===== ApexFusedLayerNormAffineFunctionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                forward_outputs = [self.output_tensor] #[ret.contiguous()]
+                [print("===== ApexFusedLayerNormAffineFunctionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== ApexFusedLayerNormAffineFunctionWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                # todo: should we assume get grad_fn from the first output???
+                ctx_ptr = int(id(self.output_tensor.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting ApexFusedLayerNormAffineFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print("ApexFusedLayerNormAffineFunctionWrapperModule compute: ", e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        try:
+            #print(ctx, ctx.saved_tensors)
+            self.x_t = from_dlpack(x)
+            self.x_t.requires_grad = False
+            ret = ApexFusedLayerNormAffineFunction.backward(ctx, self.x_t) # return two outputs
+            forward_outputs = list(ret) #[ret.contiguous()] 
+
+            [print("ApexFusedLayerNormAffineFunctionWrapperModule.backward_compute: shape: ", a.shape if a is not None else None) for a in forward_outputs]
+            # need hold the forward outputs before PythonOp Compute completed.
+            # todo: we simply ignore the last two "None" output here. In PythonOpGrad kernel, we also ignore the None output in the ends.
+            # we should use a python dict here to pass outputs.
+            self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs if r is not None]
+            [print("ApexFusedLayerNormAffineFunctionWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+            return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+            print(return_vals)
+            return tuple(return_vals)
+        except Exception as e:
+            print("ApexFusedLayerNormAffineFunctionWrapperModule backward_compute:", e)
+            return []
+
+
+class GeLUFunctionWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(GeLUFunctionWrapperModule, self).__init__()
+        self.input_tensors = []
+        self.forward_outputs = []
+        self.output_tensor = None
+
+    def compute(self, x, y):
+        try:
+            import builtins
+            self.input_tensors = [from_dlpack(i) for i in [x, y]]
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            for _, t in enumerate(self.input_tensors):
+                t.requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering GeLUFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.output_tensor = GeLUFunction.apply(*self.input_tensors)
+                print(self.output_tensor)
+                print("===== GeLUFunctionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                forward_outputs = [self.output_tensor] #[ret.contiguous()]
+                [print("===== GeLUFunctionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== GeLUFunctionWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                ctx_ptr = int(id(self.output_tensor.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting GeLUFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print("GeLUFunctionWrapperModule:", e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        try:
+            #print(ctx, ctx.saved_tensors)
+            self.x_t = from_dlpack(x)
+            self.x_t.requires_grad = False
+            ret = GeLUFunction.backward(ctx, self.x_t) # return two outputs
+            forward_outputs = list(ret) #[ret.contiguous()] 
+
+            [print("GeLUFunctionWrapperModule.backward_compute: shape: ", a.shape if a is not None else None) for a in forward_outputs]
+            # need hold the forward outputs before PythonOp Compute completed.
+            # todo: we should use a python dict here to pass outputs.
+            self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs if r is not None]
+            [print("GeLUFunctionWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+            return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+            print(return_vals)
+            return tuple(return_vals)
+        except Exception as e:
+            print("GeLUFunctionWrapperModule backward_compute:", e)
+            return []
+
+
+class _VocabParallelCrossEntropyWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(_VocabParallelCrossEntropyWrapperModule, self).__init__()
+        self.input_tensors = []
+        self.forward_outputs = []
+        self.output_tensor = None
+
+    def compute(self, x, y):
+        try:
+            import builtins
+            # y is labels, which did not need gradients. otherwise, you will get an error like this "only Tensors of floating point and complex dtype can require gradients"
+            self.input_tensors = [from_dlpack(i) for i in [x, y]]
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            self.input_tensors[0].requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering _VocabParallelCrossEntropyWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.output_tensor = _VocabParallelCrossEntropy.apply(*self.input_tensors)
+                print(self.output_tensor)
+                print("===== _VocabParallelCrossEntropyWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                forward_outputs = [self.output_tensor] #[ret.contiguous()]
+                [print("===== _VocabParallelCrossEntropyWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== _VocabParallelCrossEntropyWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                ctx_ptr = int(id(self.output_tensor.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting _VocabParallelCrossEntropyWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print("_VocabParallelCrossEntropyWrapperModule:", e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        try:
+            #print(ctx, ctx.saved_tensors)
+            self.x_t = from_dlpack(x)
+            self.x_t.requires_grad = False
+            ret = _VocabParallelCrossEntropy.backward(ctx, self.x_t) # return two outputs
+            forward_outputs = list(ret) #[ret.contiguous()] 
+
+            [print("_VocabParallelCrossEntropyWrapperModule.backward_compute: shape: ", a.shape if a is not None else None) for a in forward_outputs]
+            # need hold the forward outputs before PythonOp Compute completed.
+            # todo: we simply ignore the second "None" output here. In PythonOpGrad kernel, we also ignore the second output.
+            # we should use a python dict here to pass outputs.
+            self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs if r is not None]
+            [print("_VocabParallelCrossEntropyWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+            return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+            print(return_vals)
+            return tuple(return_vals)
+        except Exception as e:
+            print("_VocabParallelCrossEntropyWrapperModule backward_compute:", e)
+            return []
+
+
+# class ScaledUpperTriangMaskedSoftmaxWrapperModule(torch.nn.Module):
+#     def __init__(self):
+#         super(ScaledUpperTriangMaskedSoftmaxWrapperModule, self).__init__()
+#         self.x_t = None
+#         self.forward_outputs = []
+#         self.y = None
+
+#     def compute(self, x):
+#         try:
+#             self.x_t = from_dlpack(x)
+#             # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+#             self.x_t.requires_grad = True
+#             with torch.enable_grad():
+#                 print("==== Entering ScaledUpperTriangMaskedSoftmaxWrapperModule.compute , process id {} ====".format(os.getpid()))
+#                 self.y = ScaledUpperTriangMaskedSoftmax.apply(self.x_t)
+#                 print(self.y)
+#                 print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+#                 forward_outputs = [self.y] #[ret.contiguous()]
+#                 [print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+#                 # need hold the forward outputs before PythonOp Compute completed.
+#                 self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+#                 [print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+#                 ctx_ptr = int(id(self.y.grad_fn))
+#                 # ctx_ptr = int(id(ret))
+#                 #print(self.y.grad_fn.saved_tensors)
+#                 return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+#                 print(return_vals)
+#                 print("==== Exiting ScaledUpperTriangMaskedSoftmaxWrapperModule.compute , process id {} ====".format(os.getpid()))
+#                 return tuple(return_vals)
+#         except Exception as e:
+#             print("ScaledUpperTriangMaskedSoftmaxWrapperModule:", e)
+#             return []
+
+#     def backward_compute(self, ctx, x):
+#         print(ctx, ctx.saved_tensors)
+#         self.x_t = from_dlpack(x)
+#         self.x_t.requires_grad = False
+        
+#         ret = ScaledUpperTriangMaskedSoftmax.backward(ctx, self.x_t)
+#         forward_outputs = [ret] #[ret.contiguous()]
+#         [print("ScaledUpperTriangMaskedSoftmaxWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
+#         # need hold the forward outputs before PythonOp Compute completed.
+#         self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+#         [print("ScaledUpperTriangMaskedSoftmaxWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+#         return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+#         print(return_vals)
+#         return tuple(return_vals)
+
+
+
+class _CopyToModelParallelRegionWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(_CopyToModelParallelRegionWrapperModule, self).__init__()
+        self.x_t = None
+        self.forward_outputs = []
+        self.y = None
+
+    def compute(self, x):
+        try:
+            self.x_t = from_dlpack(x)
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            self.x_t.requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering _CopyToModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.y = mpu._CopyToModelParallelRegion.apply(self.x_t)
+                print(self.y)
+                print("===== _CopyToModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                forward_outputs = [self.y] #[ret.contiguous()]
+                [print("===== _CopyToModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== _CopyToModelParallelRegionWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                ctx_ptr = int(id(self.y.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting _CopyToModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print(e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        print(ctx, ctx.saved_tensors)
+        self.x_t = from_dlpack(x)
+        self.x_t.requires_grad = False
+        
+        ret = mpu._CopyToModelParallelRegion.backward(ctx, self.x_t)
+        forward_outputs = [ret] #[ret.contiguous()]
+        [print("_CopyToModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
+        # need hold the forward outputs before PythonOp Compute completed.
+        self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+        [print("_CopyToModelParallelRegionWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+        return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+        print(return_vals)
+        return tuple(return_vals)
+
+
+class _ReduceFromModelParallelRegionWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(_ReduceFromModelParallelRegionWrapperModule, self).__init__()
+        self.x_t = None
+        self.forward_outputs = []
+        self.y = None
+
+    def compute(self, x):
+        try:
+            self.x_t = from_dlpack(x)
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            self.x_t.requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering _ReduceFromModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.y = mpu._ReduceFromModelParallelRegion.apply(self.x_t)
+                print(self.y)
+                print("===== _ReduceFromModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                forward_outputs = [self.y] #[ret.contiguous()]
+                [print("===== _ReduceFromModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== _ReduceFromModelParallelRegionWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                ctx_ptr = int(id(self.y.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting _ReduceFromModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print(e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        print(ctx, ctx.saved_tensors)
+        self.x_t = from_dlpack(x)
+        self.x_t.requires_grad = False
+        
+        ret = mpu._ReduceFromModelParallelRegion.backward(ctx, self.x_t)
+        forward_outputs = [ret] #[ret.contiguous()]
+        [print("_ReduceFromModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
+        # need hold the forward outputs before PythonOp Compute completed.
+        self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+        [print("_ReduceFromModelParallelRegionWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+        return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+        print(return_vals)
+        return tuple(return_vals)
+
+
+class _ScatterToModelParallelRegionWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(_ScatterToModelParallelRegionWrapperModule, self).__init__()
+        self.x_t = None
+        self.forward_outputs = []
+        self.y = None
+
+    def compute(self, x):
+        try:
+            self.x_t = from_dlpack(x)
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            self.x_t.requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering _ScatterToModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.y = mpu._ScatterToModelParallelRegion.apply(self.x_t)
+                print(self.y)
+                print("===== _ScatterToModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                forward_outputs = [self.y] #[ret.contiguous()]
+                [print("===== _ScatterToModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== _ScatterToModelParallelRegionWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                ctx_ptr = int(id(self.y.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting _ScatterToModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print(e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        print(ctx, ctx.saved_tensors)
+        self.x_t = from_dlpack(x)
+        self.x_t.requires_grad = False
+        
+        ret = mpu._ScatterToModelParallelRegion.backward(ctx, self.x_t)
+        forward_outputs = [ret] #[ret.contiguous()]
+        [print("_ScatterToModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
+        # need hold the forward outputs before PythonOp Compute completed.
+        self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+        [print("_ScatterToModelParallelRegionWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+        return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+        print(return_vals)
+        return tuple(return_vals)
+
+
+class _GatherFromModelParallelRegionWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(_GatherFromModelParallelRegionWrapperModule, self).__init__()
+        self.x_t = None
+        self.forward_outputs = []
+        self.y = None
+
+    def compute(self, x):
+        try:
+            self.x_t = from_dlpack(x)
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            self.x_t.requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering _GatherFromModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.y = mpu._GatherFromModelParallelRegion.apply(self.x_t)
+                print(self.y)
+                print("===== _GatherFromModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                forward_outputs = [self.y] #[ret.contiguous()]
+                [print("===== _GatherFromModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== _GatherFromModelParallelRegionWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+                ctx_ptr = int(id(self.y.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting _GatherFromModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print(e)
+            return []
+
+    def backward_compute(self, ctx, x):
+        print(ctx, ctx.saved_tensors)
+        self.x_t = from_dlpack(x)
+        self.x_t.requires_grad = False
+        
+        ret = mpu._GatherFromModelParallelRegion.backward(ctx, self.x_t)
+        forward_outputs = [ret] #[ret.contiguous()]
+        [print("_GatherFromModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
+        # need hold the forward outputs before PythonOp Compute completed.
+        self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+        [print("_GatherFromModelParallelRegionWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+        return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+        print(return_vals)
+        return tuple(return_vals)
+
+
 
 def get_model(model_provider_func):
     """Build the model."""
@@ -200,9 +661,29 @@ def get_model(model_provider_func):
     # GPU allocation.
     model.cuda(torch.cuda.current_device())
 
+    print('Use ORTModule')
+    ort.register_custom_torch_function_forward("GeLUFunction", GeLUFunctionWrapperModule)
+    ort.register_custom_torch_function_backward("GeLUFunction", GeLUFunctionWrapperModule)
+    ort.register_custom_torch_function_forward("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunctionWrapperModule)
+    ort.register_custom_torch_function_backward("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunctionWrapperModule)
+    # ort.register_custom_torch_function_forward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
+    # ort.register_custom_torch_function_backward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
+    ort.register_custom_torch_function_forward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
+    ort.register_custom_torch_function_backward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
+    # ort.register_custom_torch_function_forward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_backward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_forward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_backward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_forward("_ScatterToModelParallelRegion", _ScatterToModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_backward("_ScatterToModelParallelRegion", _ScatterToModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_forward("_GatherFromModelParallelRegion", _GatherFromModelParallelRegionWrapperModule)
+    # ort.register_custom_torch_function_backward("_GatherFromModelParallelRegion", _GatherFromModelParallelRegionWrapperModule)
+
     # Fp16 conversion.
     if args.fp16:
         model = FP16Module(model)
+
+    model = ORTModule(model)
 
     if args.DDP_impl == 'torch':
         i = torch.cuda.current_device()
