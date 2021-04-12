@@ -42,5 +42,7 @@ from .gpt_model import (GPTModel,
 from .language_model import get_language_model
 from .module import FP16Module
 from .realm_model import ICTBertModel
+from .fused_layer_norm import FusedLayerNormAffineFunction
+from .fused_bias_gelu import GeLUFunction
 
 

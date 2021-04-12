@@ -100,7 +100,7 @@ def forward_step(data_iterator, model, input_tensor):
         assert input_tensor is None
         if mpu.is_pipeline_last_stage():
             output_tensor = model(tokens, position_ids, attention_mask,
-                                  labels=labels)
+                                  labels)
         else:
             output_tensor = model(tokens, position_ids, attention_mask)
     elif mpu.is_pipeline_last_stage():

@@ -82,6 +82,7 @@ class _CopyToModelParallelRegion(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_):
+        print("_CopyToModelParallelRegion(torch.autograd.Function) forward ")
         return input_
 
     @staticmethod
@@ -98,6 +99,7 @@ class _ReduceFromModelParallelRegion(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_):
+        print("_ReduceFromModelParallelRegion(torch.autograd.Function) forward")
         return _reduce(input_)
 
     @staticmethod
@@ -114,6 +116,7 @@ class _ScatterToModelParallelRegion(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_):
+        print("_ScatterToModelParallelRegion(torch.autograd.Function) forward")
         return _split(input_)
 
     @staticmethod
@@ -130,6 +133,7 @@ class _GatherFromModelParallelRegion(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_):
+        print("_GatherFromModelParallelRegion(torch.autograd.Function) forward")
         return _gather(input_)
 
     @staticmethod

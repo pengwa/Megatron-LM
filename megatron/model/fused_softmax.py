@@ -23,9 +23,10 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function) :
        3. Perform softmax.
     """
     @staticmethod
-    def forward(ctx, inputs, scale):
+    def forward(ctx, inputs, scale_t):
+        print("ScaledUpperTriangMaskedSoftmax(torch.autograd.Function) forward")
         import scaled_upper_triang_masked_softmax_cuda
-        scale_t = torch.tensor([scale])
+        #scale_t = torch.tensor([scale])
 
         softmax_results =  \
             scaled_upper_triang_masked_softmax_cuda.forward(inputs, scale_t[0])
@@ -52,6 +53,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function) :
     """
     @staticmethod
     def forward(ctx, inputs, mask, scale):
+        print("ScaledMaskedSoftmax(torch.autograd.Function) forward")
         import scaled_masked_softmax_cuda
         scale_t = torch.tensor([scale])
 
@@ -108,7 +110,8 @@ class FusedScaleMaskSoftmax(torch.nn.Module):
             scale = self.scale if self.scale is not None  else 1.0
             if self.upper_triang_mask_fusion:
                 input = input.view(-1, data_size[2], data_size[3])
-                probs = ScaledUpperTriangMaskedSoftmax.apply(input, scale)
+                print(scale, "####################")
+                probs = ScaledUpperTriangMaskedSoftmax.apply(input, torch.Tensor([scale]))
                 probs = probs.view(*data_size)
             else:
                 probs = ScaledMaskedSoftmax.apply(input, mask, scale)

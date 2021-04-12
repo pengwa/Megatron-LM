@@ -137,9 +137,11 @@ class GPTModel(GPTModelBase):
             num_tokentypes=num_tokentypes,
             parallel_output=parallel_output)
 
-    def forward(self, input_ids, position_ids, attention_mask, labels=None,
-                tokentype_ids=None, layer_past=None, get_key_value=False,
-                forward_method_parallel_output=None):
+    def forward(self, input_ids, position_ids, attention_mask, labels):
+        tokentype_ids=None
+        layer_past=None
+        get_key_value=False
+        forward_method_parallel_output=None
         return super(GPTModel, self).forward(
             (input_ids, position_ids),
             attention_mask,

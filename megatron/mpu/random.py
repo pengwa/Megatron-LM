@@ -251,6 +251,7 @@ class CheckpointFunction(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, run_function, *args):
+        print("CheckpointFunction(torch.autograd.Function) forward")
         ctx.run_function = run_function
 
         # Copy the rng states.
