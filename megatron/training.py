@@ -39,9 +39,11 @@ from megatron.checkpointing import load_checkpoint
 from megatron.checkpointing import save_checkpoint
 from megatron.model import FP16Module
 from megatron.optimizer import get_megatron_optimizer 
-from megatron.model import GeLUFunction, FusedLayerNormAffineFunction
+from megatron.model import GeLUFunction, ScaledUpperTriangMaskedSoftmax
 from apex.normalization.fused_layer_norm import FusedLayerNormAffineFunction as ApexFusedLayerNormAffineFunction
-from megatron.mpu import _VocabParallelCrossEntropy
+from megatron.mpu import (_VocabParallelCrossEntropy, _ScatterToModelParallelRegion, 
+                          _CopyToModelParallelRegion, _ReduceFromModelParallelRegion,
+                          _GatherFromModelParallelRegion)
 
 from megatron.initialize import initialize_megatron
 from megatron.initialize import write_args_to_tensorboard
@@ -211,8 +213,8 @@ class ApexFusedLayerNormAffineFunctionWrapperModule(torch.nn.Module):
             with torch.enable_grad():
                 print("==== Entering ApexFusedLayerNormAffineFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
                 self.output_tensor = ApexFusedLayerNormAffineFunction.apply(*self.input_tensors)
-                print(self.output_tensor)
-                print("===== ApexFusedLayerNormAffineFunctionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                # print(self.output_tensor)
+                # print("===== ApexFusedLayerNormAffineFunctionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
                 forward_outputs = [self.output_tensor] #[ret.contiguous()]
                 [print("===== ApexFusedLayerNormAffineFunctionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -272,8 +274,8 @@ class GeLUFunctionWrapperModule(torch.nn.Module):
             with torch.enable_grad():
                 print("==== Entering GeLUFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
                 self.output_tensor = GeLUFunction.apply(*self.input_tensors)
-                print(self.output_tensor)
-                print("===== GeLUFunctionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                # print(self.output_tensor)
+                # print("===== GeLUFunctionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
                 forward_outputs = [self.output_tensor] #[ret.contiguous()]
                 [print("===== GeLUFunctionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -331,8 +333,8 @@ class _VocabParallelCrossEntropyWrapperModule(torch.nn.Module):
             with torch.enable_grad():
                 print("==== Entering _VocabParallelCrossEntropyWrapperModule.compute , process id {} ====".format(os.getpid()))
                 self.output_tensor = _VocabParallelCrossEntropy.apply(*self.input_tensors)
-                print(self.output_tensor)
-                print("===== _VocabParallelCrossEntropyWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                # print(self.output_tensor)
+                # print("===== _VocabParallelCrossEntropyWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
                 forward_outputs = [self.output_tensor] #[ret.contiguous()]
                 [print("===== _VocabParallelCrossEntropyWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -373,59 +375,64 @@ class _VocabParallelCrossEntropyWrapperModule(torch.nn.Module):
             print("_VocabParallelCrossEntropyWrapperModule backward_compute:", e)
             return []
 
+# fp16 only
+class ScaledUpperTriangMaskedSoftmaxWrapperModule(torch.nn.Module):
+    def __init__(self):
+        super(ScaledUpperTriangMaskedSoftmaxWrapperModule, self).__init__()
+        self.input_tensors = []
+        self.forward_outputs = []
+        self.output_tensor = None
 
-# class ScaledUpperTriangMaskedSoftmaxWrapperModule(torch.nn.Module):
-#     def __init__(self):
-#         super(ScaledUpperTriangMaskedSoftmaxWrapperModule, self).__init__()
-#         self.x_t = None
-#         self.forward_outputs = []
-#         self.y = None
+    def compute(self, x, y):
+        try:
+            import builtins
+            self.input_tensors = [from_dlpack(i) for i in [x, y]]
+            # what if custom function modify x, and in ORT is using an unexpected value at the same time.
+            self.input_tensors[0].requires_grad = True
+            with torch.enable_grad():
+                print("==== Entering ScaledUpperTriangMaskedSoftmaxWrapperModule.compute , process id {} ====".format(os.getpid()))
+                self.output_tensor = ScaledUpperTriangMaskedSoftmax.apply(*self.input_tensors)
+                # print(self.output_tensor)
+                # print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.output_tensor, self.output_tensor.device, self.output_tensor.grad_fn))
+                forward_outputs = [self.output_tensor] #[ret.contiguous()]
+                [print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
-#     def compute(self, x):
-#         try:
-#             self.x_t = from_dlpack(x)
-#             # what if custom function modify x, and in ORT is using an unexpected value at the same time.
-#             self.x_t.requires_grad = True
-#             with torch.enable_grad():
-#                 print("==== Entering ScaledUpperTriangMaskedSoftmaxWrapperModule.compute , process id {} ====".format(os.getpid()))
-#                 self.y = ScaledUpperTriangMaskedSoftmax.apply(self.x_t)
-#                 print(self.y)
-#                 print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
-#                 forward_outputs = [self.y] #[ret.contiguous()]
-#                 [print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
+                # need hold the forward outputs before PythonOp Compute completed.
+                self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
+                [print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
 
-#                 # need hold the forward outputs before PythonOp Compute completed.
-#                 self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
-#                 [print("===== ScaledUpperTriangMaskedSoftmaxWrapperModule.compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
-
-#                 ctx_ptr = int(id(self.y.grad_fn))
-#                 # ctx_ptr = int(id(ret))
-#                 #print(self.y.grad_fn.saved_tensors)
-#                 return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
-#                 print(return_vals)
-#                 print("==== Exiting ScaledUpperTriangMaskedSoftmaxWrapperModule.compute , process id {} ====".format(os.getpid()))
-#                 return tuple(return_vals)
-#         except Exception as e:
-#             print("ScaledUpperTriangMaskedSoftmaxWrapperModule:", e)
-#             return []
-
-#     def backward_compute(self, ctx, x):
-#         print(ctx, ctx.saved_tensors)
-#         self.x_t = from_dlpack(x)
-#         self.x_t.requires_grad = False
-        
-#         ret = ScaledUpperTriangMaskedSoftmax.backward(ctx, self.x_t)
-#         forward_outputs = [ret] #[ret.contiguous()]
-#         [print("ScaledUpperTriangMaskedSoftmaxWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
-#         # need hold the forward outputs before PythonOp Compute completed.
-#         self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs]
-#         [print("ScaledUpperTriangMaskedSoftmaxWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
-
-#         return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
-#         print(return_vals)
-#         return tuple(return_vals)
+                ctx_ptr = int(id(self.output_tensor.grad_fn))
+                # ctx_ptr = int(id(ret))
+                #print(self.y.grad_fn.saved_tensors)
+                return_vals = [ctx_ptr] + [int(r.ortvalue_ptr()) for r in self.forward_outputs]
+                print(return_vals)
+                print("==== Exiting ScaledUpperTriangMaskedSoftmaxWrapperModule.compute , process id {} ====".format(os.getpid()))
+                return tuple(return_vals)
+        except Exception as e:
+            print("ScaledUpperTriangMaskedSoftmaxWrapperModule:", e)
+            return []
 
 
+    def backward_compute(self, ctx, x):
+        try:
+            #print(ctx, ctx.saved_tensors)
+            self.x_t = from_dlpack(x)
+            self.x_t.requires_grad = False
+            ret = ScaledUpperTriangMaskedSoftmax.backward(ctx, self.x_t) # return two outputs
+            forward_outputs = list(ret) #[ret.contiguous()] 
+
+            [print("ScaledUpperTriangMaskedSoftmaxWrapperModule.backward_compute: shape: ", a.shape if a is not None else None) for a in forward_outputs]
+            # need hold the forward outputs before PythonOp Compute completed.
+            # todo: we should use a python dict here to pass outputs.
+            self.forward_outputs = [_ortvalue_from_dlpack(to_dlpack(r)) for r in forward_outputs if r is not None]
+            [print("ScaledUpperTriangMaskedSoftmaxWrapperModule.backward_compute: tensor->MutableDataRaw addr", int(r.data_ptr())) for r in self.forward_outputs]
+
+            return_vals =[int(r.ortvalue_ptr()) for r in self.forward_outputs]
+            print(return_vals)
+            return tuple(return_vals)
+        except Exception as e:
+            print("ScaledUpperTriangMaskedSoftmaxWrapperModule backward_compute:", e)
+            return []
 
 class _CopyToModelParallelRegionWrapperModule(torch.nn.Module):
     def __init__(self):
@@ -441,9 +448,9 @@ class _CopyToModelParallelRegionWrapperModule(torch.nn.Module):
             self.x_t.requires_grad = True
             with torch.enable_grad():
                 print("==== Entering _CopyToModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
-                self.y = mpu._CopyToModelParallelRegion.apply(self.x_t)
-                print(self.y)
-                print("===== _CopyToModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                self.y = _CopyToModelParallelRegion.apply(self.x_t)
+                # print(self.y)
+                # print("===== _CopyToModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
                 forward_outputs = [self.y] #[ret.contiguous()]
                 [print("===== _CopyToModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -467,7 +474,7 @@ class _CopyToModelParallelRegionWrapperModule(torch.nn.Module):
         self.x_t = from_dlpack(x)
         self.x_t.requires_grad = False
         
-        ret = mpu._CopyToModelParallelRegion.backward(ctx, self.x_t)
+        ret = _CopyToModelParallelRegion.backward(ctx, self.x_t)
         forward_outputs = [ret] #[ret.contiguous()]
         [print("_CopyToModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
         # need hold the forward outputs before PythonOp Compute completed.
@@ -493,9 +500,9 @@ class _ReduceFromModelParallelRegionWrapperModule(torch.nn.Module):
             self.x_t.requires_grad = True
             with torch.enable_grad():
                 print("==== Entering _ReduceFromModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
-                self.y = mpu._ReduceFromModelParallelRegion.apply(self.x_t)
-                print(self.y)
-                print("===== _ReduceFromModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                self.y = _ReduceFromModelParallelRegion.apply(self.x_t)
+                # print(self.y)
+                # print("===== _ReduceFromModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
                 forward_outputs = [self.y] #[ret.contiguous()]
                 [print("===== _ReduceFromModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -519,7 +526,7 @@ class _ReduceFromModelParallelRegionWrapperModule(torch.nn.Module):
         self.x_t = from_dlpack(x)
         self.x_t.requires_grad = False
         
-        ret = mpu._ReduceFromModelParallelRegion.backward(ctx, self.x_t)
+        ret = _ReduceFromModelParallelRegion.backward(ctx, self.x_t)
         forward_outputs = [ret] #[ret.contiguous()]
         [print("_ReduceFromModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
         # need hold the forward outputs before PythonOp Compute completed.
@@ -545,9 +552,9 @@ class _ScatterToModelParallelRegionWrapperModule(torch.nn.Module):
             self.x_t.requires_grad = True
             with torch.enable_grad():
                 print("==== Entering _ScatterToModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
-                self.y = mpu._ScatterToModelParallelRegion.apply(self.x_t)
-                print(self.y)
-                print("===== _ScatterToModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                self.y = _ScatterToModelParallelRegion.apply(self.x_t)
+                # print(self.y)
+                # print("===== _ScatterToModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
                 forward_outputs = [self.y] #[ret.contiguous()]
                 [print("===== _ScatterToModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -571,7 +578,7 @@ class _ScatterToModelParallelRegionWrapperModule(torch.nn.Module):
         self.x_t = from_dlpack(x)
         self.x_t.requires_grad = False
         
-        ret = mpu._ScatterToModelParallelRegion.backward(ctx, self.x_t)
+        ret = _ScatterToModelParallelRegion.backward(ctx, self.x_t)
         forward_outputs = [ret] #[ret.contiguous()]
         [print("_ScatterToModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
         # need hold the forward outputs before PythonOp Compute completed.
@@ -597,9 +604,9 @@ class _GatherFromModelParallelRegionWrapperModule(torch.nn.Module):
             self.x_t.requires_grad = True
             with torch.enable_grad():
                 print("==== Entering _GatherFromModelParallelRegionWrapperModule.compute , process id {} ====".format(os.getpid()))
-                self.y = mpu._GatherFromModelParallelRegion.apply(self.x_t)
-                print(self.y)
-                print("===== _GatherFromModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
+                self.y = _GatherFromModelParallelRegion.apply(self.x_t)
+                # print(self.y)
+                # print("===== _GatherFromModelParallelRegionWrapperModule.compute forward output: {} on device {}, grad_fn: {}".format(self.y, self.y.device, self.y.grad_fn))
                 forward_outputs = [self.y] #[ret.contiguous()]
                 [print("===== _GatherFromModelParallelRegionWrapperModule.compute: shape: ", a.shape) for a in forward_outputs]
 
@@ -623,7 +630,7 @@ class _GatherFromModelParallelRegionWrapperModule(torch.nn.Module):
         self.x_t = from_dlpack(x)
         self.x_t.requires_grad = False
         
-        ret = mpu._GatherFromModelParallelRegion.backward(ctx, self.x_t)
+        ret = _GatherFromModelParallelRegion.backward(ctx, self.x_t)
         forward_outputs = [ret] #[ret.contiguous()]
         [print("_GatherFromModelParallelRegionWrapperModule.backward_compute: shape: ", a.shape) for a in forward_outputs]
         # need hold the forward outputs before PythonOp Compute completed.
@@ -666,8 +673,8 @@ def get_model(model_provider_func):
     ort.register_custom_torch_function_backward("GeLUFunction", GeLUFunctionWrapperModule)
     ort.register_custom_torch_function_forward("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunctionWrapperModule)
     ort.register_custom_torch_function_backward("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunctionWrapperModule)
-    # ort.register_custom_torch_function_forward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
-    # ort.register_custom_torch_function_backward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
+    ort.register_custom_torch_function_forward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
+    ort.register_custom_torch_function_backward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
     ort.register_custom_torch_function_forward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
     ort.register_custom_torch_function_backward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
     # ort.register_custom_torch_function_forward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)

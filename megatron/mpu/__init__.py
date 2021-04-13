@@ -52,6 +52,10 @@ from .mappings import copy_to_tensor_model_parallel_region
 from .mappings import gather_from_tensor_model_parallel_region
 from .mappings import reduce_from_tensor_model_parallel_region
 from .mappings import scatter_to_tensor_model_parallel_region
+from .mappings import _ScatterToModelParallelRegion
+from .mappings import _CopyToModelParallelRegion
+from .mappings import _ReduceFromModelParallelRegion
+from .mappings import _GatherFromModelParallelRegion
 
 from .random import checkpoint
 from .random import get_cuda_rng_tracker

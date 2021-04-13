@@ -44,5 +44,6 @@ from .module import FP16Module
 from .realm_model import ICTBertModel
 from .fused_layer_norm import FusedLayerNormAffineFunction
 from .fused_bias_gelu import GeLUFunction
+from .fused_softmax import ScaledUpperTriangMaskedSoftmax
 
 

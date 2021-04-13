@@ -110,7 +110,6 @@ class FusedScaleMaskSoftmax(torch.nn.Module):
             scale = self.scale if self.scale is not None  else 1.0
             if self.upper_triang_mask_fusion:
                 input = input.view(-1, data_size[2], data_size[3])
-                print(scale, "####################")
                 probs = ScaledUpperTriangMaskedSoftmax.apply(input, torch.Tensor([scale]))
                 probs = probs.view(*data_size)
             else:

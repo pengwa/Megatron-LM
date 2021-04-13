@@ -131,13 +131,17 @@ class FP16Module(MegatronModule):
 
     def __init__(self, module):
         super(FP16Module, self).__init__()
+        # this probabbly be the root cause we see different weight name prefix between Pytorch named parameter
+        # and exported ONNX model.
         self.add_module('module', module.half())
 
-
-    def forward(self, *inputs, **kwargs):
+    # remove **kwargs here, otherwise, get exception: NotImplementedError: The model's forward method has **kwargs parameter which is currently not supported.
+    # obseved that kwargs is empty for pytorch run.
+    #def forward(self, *inputs, **kwargs):
+    def forward(self, *inputs):
         if mpu.is_pipeline_first_stage():
             inputs = fp32_to_fp16(inputs)
-        outputs = self.module(*inputs, **kwargs)
+        outputs = self.module(*inputs)
         if mpu.is_pipeline_last_stage():
             outputs = fp16_to_fp32(outputs)
         return outputs
