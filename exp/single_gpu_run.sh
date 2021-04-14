@@ -2,7 +2,7 @@ CHECKPOINT_PATH=checkpoints/gpt2_345m
 VOCAB_FILE=gpt2-vocab.json
 MERGE_FILE=gpt2-merges.txt
 DATA_PATH=test_data/my-gpt2_text_document
-
+# export FP16_TRAINING=True
 GPT_ARGS="--num-layers 2 \
           --hidden-size 1024 \
           --num-attention-heads 16 \
@@ -19,7 +19,7 @@ GPT_ARGS="--num-layers 2 \
           --lr-warmup-fraction .01 \
           --train-iters 1"
 
-#          --fp16 \
+#             --fp16 \       
 
 OUTPUT_ARGS="--log-interval 1 \
            --save-interval 500 "

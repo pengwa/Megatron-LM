@@ -202,14 +202,14 @@ class ApexFusedLayerNormAffineFunctionWrapperModule(torch.nn.Module):
         self.forward_outputs = []
         self.output_tensor = None
 
-    def compute(self, x, y, z):
+    def compute(self, x, y, z, compute_shapes, eps):
         try:
             import builtins
             self.input_tensors = [from_dlpack(i) for i in [x, y, z]]
             # what if custom function modify x, and in ORT is using an unexpected value at the same time.
             for _, t in enumerate(self.input_tensors):
                 t.requires_grad = True
-            self.input_tensors.extend([(1024,), 1e-05])
+            self.input_tensors.extend([compute_shapes, eps])
             with torch.enable_grad():
                 print("==== Entering ApexFusedLayerNormAffineFunctionWrapperModule.compute , process id {} ====".format(os.getpid()))
                 self.output_tensor = ApexFusedLayerNormAffineFunction.apply(*self.input_tensors)
@@ -679,8 +679,8 @@ def get_model(model_provider_func):
     ort.register_custom_torch_function_backward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
     # ort.register_custom_torch_function_forward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
     # ort.register_custom_torch_function_backward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
-    # ort.register_custom_torch_function_forward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
-    # ort.register_custom_torch_function_backward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
+    ort.register_custom_torch_function_forward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
+    ort.register_custom_torch_function_backward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
     # ort.register_custom_torch_function_forward("_ScatterToModelParallelRegion", _ScatterToModelParallelRegionWrapperModule)
     # ort.register_custom_torch_function_backward("_ScatterToModelParallelRegion", _ScatterToModelParallelRegionWrapperModule)
     # ort.register_custom_torch_function_forward("_GatherFromModelParallelRegion", _GatherFromModelParallelRegionWrapperModule)
