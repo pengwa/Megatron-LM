@@ -176,7 +176,9 @@ class VocabParallelEmbedding(torch.nn.Module):
                          (input_ >= self.vocab_end_index)
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
-            masked_input[input_mask] = 0
+            # pengwa: this is to workaround the exporting issue, check notes for the exception details.
+            # masked_input[input_mask] = 0
+            masked_input = masked_input.masked_fill(input_mask, 0)
         else:
             masked_input = input_
             # Get the embeddings.
@@ -186,7 +188,10 @@ class VocabParallelEmbedding(torch.nn.Module):
                                       self.sparse)
         # Mask the output embedding.
         if self.tensor_model_parallel_size > 1:
-            output_parallel[input_mask, :] = 0.0
+            # pengwa: this is to workaround the exporting issue, check notes for the exception details.
+            # output_parallel[input_mask, :] = 0.0
+            expanded_mask = input_mask.unsqueeze(-1).expand(output_parallel.size())
+            output_parallel = output_parallel.masked_fill(expanded_mask, 0.0)
         # Reduce across all the model parallel GPUs.
         output = reduce_from_tensor_model_parallel_region(output_parallel)
         return output

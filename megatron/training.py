@@ -53,8 +53,6 @@ from megatron.model.realm_model import ICTBertModel
 from megatron.utils import check_adlr_autoresume_termination
 from megatron.data.data_loaders import build_pretraining_data_loader
 from megatron.utils import report_memory
-from onnxruntime.training import ORTModule
-
 
 import onnx
 import torch
@@ -677,8 +675,8 @@ def get_model(model_provider_func):
     ort.register_custom_torch_function_backward("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmaxWrapperModule)
     ort.register_custom_torch_function_forward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
     ort.register_custom_torch_function_backward("_VocabParallelCrossEntropy", _VocabParallelCrossEntropyWrapperModule)
-    # ort.register_custom_torch_function_forward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
-    # ort.register_custom_torch_function_backward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
+    ort.register_custom_torch_function_forward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
+    ort.register_custom_torch_function_backward("_CopyToModelParallelRegion", _CopyToModelParallelRegionWrapperModule)
     ort.register_custom_torch_function_forward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
     ort.register_custom_torch_function_backward("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegionWrapperModule)
     # ort.register_custom_torch_function_forward("_ScatterToModelParallelRegion", _ScatterToModelParallelRegionWrapperModule)
