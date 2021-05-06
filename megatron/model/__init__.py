@@ -20,3 +20,7 @@ from .bert_model import BertModel
 from .gpt_model import GPTModel
 from .language_model import get_language_model
 from .module import Float16Module
+
+from .fused_layer_norm import FusedLayerNormAffineFunction
+from .fused_bias_gelu import GeLUFunction
+from .fused_softmax import ScaledUpperTriangMaskedSoftmax

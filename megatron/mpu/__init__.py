@@ -16,6 +16,12 @@
 """Model parallel utility interface."""
 
 from .cross_entropy import vocab_parallel_cross_entropy
+from .cross_entropy import _VocabParallelCrossEntropy
+
+from .mappings import _ScatterToModelParallelRegion
+from .mappings import _CopyToModelParallelRegion
+from .mappings import _ReduceFromModelParallelRegion
+from .mappings import _GatherFromModelParallelRegion
 
 from .data import broadcast_data
 

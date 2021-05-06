@@ -54,6 +54,28 @@ from megatron.utils import report_memory
 
 
 
+from megatron.model import GeLUFunction, ScaledUpperTriangMaskedSoftmax
+from apex.normalization.fused_layer_norm import FusedLayerNormAffineFunction as ApexFusedLayerNormAffineFunction
+from megatron.mpu import (_VocabParallelCrossEntropy, _ScatterToModelParallelRegion, 
+                          _CopyToModelParallelRegion, _ReduceFromModelParallelRegion,
+                          _GatherFromModelParallelRegion)
+from torch.nn.parameter import Parameter
+
+import onnx
+import torch
+torch.manual_seed(1)
+import onnxruntime as ort
+import os
+from torch.utils.dlpack import from_dlpack, to_dlpack
+ 
+from onnxruntime.capi.onnxruntime_inference_collection import OrtValue
+from onnxruntime.capi import _pybind_state as C
+import copy
+import numpy as np
+import threading
+import sys
+
+
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
     torch.distributed.barrier()
@@ -240,6 +262,21 @@ def get_model(model_provider_func):
     # GPU allocation.
     for model_module in model:
         model_module.cuda(torch.cuda.current_device())
+
+    print('Use ORTModule')
+    ort.register_forward_core("GeLUFunction", GeLUFunction.apply)
+    ort.register_backward_core("GeLUFunction", GeLUFunction.backward)
+    ort.register_forward_core("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunction.apply)
+    ort.register_backward_core("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunction.backward)
+    ort.register_forward_core("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmax.apply)
+    ort.register_backward_core("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmax.backward)
+    ort.register_forward_core("_VocabParallelCrossEntropy", _VocabParallelCrossEntropy.apply)
+    ort.register_backward_core("_VocabParallelCrossEntropy", _VocabParallelCrossEntropy.backward)
+    ort.register_forward_core("_CopyToModelParallelRegion", _CopyToModelParallelRegion.apply)
+    ort.register_backward_core("_CopyToModelParallelRegion", _CopyToModelParallelRegion.backward)
+    ort.register_forward_core("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegion.apply)
+    ort.register_backward_core("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegion.backward)
+
 
     # Fp16 conversion.
     if args.fp16 or args.bf16:
