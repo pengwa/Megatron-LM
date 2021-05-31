@@ -76,9 +76,9 @@ def _gather(input_):
 class _CopyToModelParallelRegion(torch.autograd.Function):
     """Pass the input to the model parallel region."""
 
-    @staticmethod
-    def symbolic(graph, input_):
-        return input_
+    # @staticmethod
+    # def symbolic(graph, input_):
+    #     return input_
     
     @staticmethod
     def forward(ctx, input_):
@@ -92,9 +92,9 @@ class _CopyToModelParallelRegion(torch.autograd.Function):
 class _ReduceFromModelParallelRegion(torch.autograd.Function):
     """All-reduce the input from the model parallel region."""
 
-    @staticmethod
-    def symbolic(graph, input_):
-        return _reduce(input_)
+    # @staticmethod
+    # def symbolic(graph, input_):
+    #     return _reduce(input_)
     
     @staticmethod
     def forward(ctx, input_):

@@ -61,6 +61,8 @@ from megatron.mpu import (_VocabParallelCrossEntropy, _ScatterToModelParallelReg
                           _GatherFromModelParallelRegion)
 from torch.nn.parameter import Parameter
 
+from onnxruntime.training.ortmodule import _utils, ORTModule
+from onnxruntime.training.ortmodule._graph_execution_manager_factory import GraphExecutionManagerFactory 
 import onnx
 import torch
 torch.manual_seed(1)
@@ -75,6 +77,11 @@ import numpy as np
 import threading
 import sys
 
+
+def set_onnx_fallthrough_export_type(module):
+    onnx_export_type = torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH
+    module._execution_manager = GraphExecutionManagerFactory(
+        module._module_metadata.flattened_module, onnx_export_type=onnx_export_type)
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -264,23 +271,13 @@ def get_model(model_provider_func):
         model_module.cuda(torch.cuda.current_device())
 
     print('Use ORTModule')
-    ort.register_forward_core("GeLUFunction", GeLUFunction.apply)
-    ort.register_backward_core("GeLUFunction", GeLUFunction.backward)
-    ort.register_forward_core("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunction.apply)
-    ort.register_backward_core("FusedLayerNormAffineFunction", ApexFusedLayerNormAffineFunction.backward)
-    ort.register_forward_core("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmax.apply)
-    ort.register_backward_core("ScaledUpperTriangMaskedSoftmax", ScaledUpperTriangMaskedSoftmax.backward)
-    ort.register_forward_core("_VocabParallelCrossEntropy", _VocabParallelCrossEntropy.apply)
-    ort.register_backward_core("_VocabParallelCrossEntropy", _VocabParallelCrossEntropy.backward)
-    ort.register_forward_core("_CopyToModelParallelRegion", _CopyToModelParallelRegion.apply)
-    ort.register_backward_core("_CopyToModelParallelRegion", _CopyToModelParallelRegion.backward)
-    ort.register_forward_core("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegion.apply)
-    ort.register_backward_core("_ReduceFromModelParallelRegion", _ReduceFromModelParallelRegion.backward)
 
 
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         model = [Float16Module(model_module, args) for model_module in model]
+        model = [ORTModule(model_module) for model_module in model]
+        [set_onnx_fallthrough_export_type(model_module) for model_module in model]
 
     if args.DDP_impl == 'torch':
         i = torch.cuda.current_device()
@@ -350,7 +347,7 @@ def setup_model_and_optimizer(model_provider_func):
     model = get_model(model_provider_func)
 
     unwrapped_model = unwrap_model(model,
-                                   (torchDDP, LocalDDP, Float16Module))
+                                   (torchDDP, LocalDDP, ORTModule, Float16Module))
     optimizer = get_megatron_optimizer(unwrapped_model)
 
     lr_scheduler = get_learning_rate_scheduler(optimizer)
@@ -430,7 +427,7 @@ def train_step(forward_step_func, data_iterator,
         elif mpu.is_pipeline_last_stage(ignore_virtual=True):
             unwrapped_model = model[-1]
         unwrapped_model = unwrap_model(
-            unwrapped_model, (torchDDP, LocalDDP, Float16Module))
+            unwrapped_model, (torchDDP, LocalDDP, ORTModule, Float16Module))
 
         if unwrapped_model.share_word_embeddings:
             word_embeddings_weight = unwrapped_model.word_embeddings_weight()

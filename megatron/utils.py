@@ -30,6 +30,7 @@ from megatron import mpu
 from megatron.model.module import param_is_not_shared
 from megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
 
+from onnxruntime.training.ortmodule import ORTModule
 
 def unwrap_model(model, module_instances=(torchDDP)):
     return_list = True
@@ -39,7 +40,10 @@ def unwrap_model(model, module_instances=(torchDDP)):
     unwrapped_model = []
     for model_module in model:
         while isinstance(model_module, module_instances):
-            model_module = model_module.module
+            if isinstance(model_module, (ORTModule)):
+                model_module = model_module._module_metadata.original_module
+            else:
+                model_module = model_module.module
         unwrapped_model.append(model_module)
     if not return_list:
         return unwrapped_model[0]
