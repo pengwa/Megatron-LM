@@ -76,9 +76,9 @@ def _gather(input_):
 class _CopyToModelParallelRegion(torch.autograd.Function):
     """Pass the input to the model parallel region."""
 
-    @staticmethod
-    def symbolic(graph, input_):
-        return input_
+    # @staticmethod
+    # def symbolic(graph, input_):
+    #     return input_
     
     @staticmethod
     def forward(ctx, input_):
@@ -92,12 +92,15 @@ class _CopyToModelParallelRegion(torch.autograd.Function):
 class _ReduceFromModelParallelRegion(torch.autograd.Function):
     """All-reduce the input from the model parallel region."""
 
-    @staticmethod
-    def symbolic(graph, input_):
-        return _reduce(input_)
+    # @staticmethod
+    # def symbolic(graph, input_):
+    #     return _reduce(input_)
     
     @staticmethod
     def forward(ctx, input_):
+        if get_tensor_model_parallel_world_size() > 1:
+            ctx.mark_dirty(input_)
+
         return _reduce(input_)
 
     @staticmethod

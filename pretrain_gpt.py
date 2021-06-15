@@ -70,7 +70,7 @@ def get_batch(data_iterator):
         args.reset_attention_mask,
         args.eod_mask_loss)
 
-    return tokens, labels, loss_mask, attention_mask, position_ids
+    return tokens, labels, loss_mask.contiguous(), attention_mask.contiguous(), position_ids.contiguous()
 
 def loss_func(loss_mask, output_tensor):
     losses = output_tensor.float()

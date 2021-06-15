@@ -429,6 +429,8 @@ def _add_training_args(parser):
     group.add_argument('--dataloader-type', type=str, default=None,
                        choices=['single', 'cyclic'],
                        help='Single pass vs multiple pass data loader')
+    group.add_argument('--use-ort', action='store_true',
+                       help='Use ONNX Runtime to train and inference.')
     return parser
 
 

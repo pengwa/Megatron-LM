@@ -23,6 +23,7 @@ from megatron import get_args
 from megatron import mpu
 from .module import MegatronModule
 
+from onnxruntime.training.ortmodule import ORTModule
 
 
 class MemoryBuffer:
@@ -77,8 +78,10 @@ class DistributedDataParallelBase(MegatronModule, ABC):
 
     def state_dict_for_save_checkpoint(self, destination=None, prefix='',
                                        keep_vars=False):
-        return self.module.state_dict_for_save_checkpoint(destination, prefix,
-                                                          keep_vars)
+        model_module = self.module
+        if isinstance(model_module, (ORTModule)):
+            model_module = model_module._module_metadata.original_module
+        return model_module.state_dict_for_save_checkpoint(destination, prefix, keep_vars)
 
 
     def load_state_dict(self, state_dict, strict=True):

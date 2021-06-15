@@ -51,7 +51,7 @@ from megatron.schedules import forward_backward_no_pipelining
 from megatron.schedules import forward_backward_pipelining_without_interleaving
 from megatron.schedules import forward_backward_pipelining_with_interleaving
 from megatron.utils import report_memory
-
+from onnxruntime.training.ortmodule import ORTModule
 
 
 def print_datetime(string):
@@ -139,11 +139,13 @@ def pretrain(train_valid_test_dataset_provider,
     print_rank_0('training ...')
 
     iteration = 0
+    start_training_loop_time = time.time()
     if args.do_train and args.train_iters > 0:
         iteration = train(forward_step_func,
                           model, optimizer, lr_scheduler,
                           train_data_iterator, valid_data_iterator)
     print_datetime('after training is done')
+    print_rank_0("done training loop, e2e duration: " + str(time.time() - start_training_loop_time))
 
     if args.do_valid:
         prefix = 'the end of training for val data'
@@ -154,12 +156,14 @@ def pretrain(train_valid_test_dataset_provider,
     if args.save and iteration != 0:
         save_checkpoint(iteration, model, optimizer, lr_scheduler)
 
-    if args.do_test:
-        # Run on test data.
-        prefix = 'the end of training for test data'
-        evaluate_and_print_results(prefix, forward_step_func,
-                                   test_data_iterator, model,
-                                   0, True)
+    # if args.do_test:
+    #     # Run on test data.
+    #     start_test_evaluate_loop_time = time.time()
+    #     prefix = 'the end of training for test data'
+    #     evaluate_and_print_results(prefix, forward_step_func,
+    #                                test_data_iterator, model,
+    #                                0, True)
+    #     print_rank_0("done evaluate test data, e2e duration: " + str(time.time() - start_test_evaluate_loop_time))
 
 def update_train_iters(args):
 
@@ -244,6 +248,13 @@ def get_model(model_provider_func):
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         model = [Float16Module(model_module, args) for model_module in model]
+
+        if args.use_ort:
+            print('Use ORTModule')
+            model = [ORTModule(model_module) for model_module in model]
+            for mode in [True, False]:
+                for model_module in model:
+                    model_module._execution_manager(mode)._enable_custom_autograd_function = True
 
     if args.DDP_impl == 'torch':
         i = torch.cuda.current_device()
